@@ -32,9 +32,9 @@ jobs:
       - name: Install security tools
         run: |
           pip install checkov semgrep
-          # Trivy — install via official script
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
-          trivy --version
+          # Grype — install via official script
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+          grype version
 
       # ─────────────────────────────────────────────
       # 1. Secrets Detection (Checkov)
@@ -73,17 +73,16 @@ jobs:
           mv results/results_sarif.sarif results/checkov-iac.sarif 2>/dev/null || true
 
       # ─────────────────────────────────────────────
-      # 2. Dependency/SCA Scanning (Trivy)
+      # 3. Dependency/SCA Scanning (Grype)
       # ─────────────────────────────────────────────
-      - name: "Trivy: Dependency Scan"
-        id: trivy_sca
+      - name: "Grype: Dependency Scan"
+        id: grype_sca
         continue-on-error: true
         run: |
-          echo "::group::Trivy Dependency Scan"
-          trivy fs . \
-            --scanners vuln \
-            --format sarif \
-            --output results/trivy-sca.sarif
+          echo "::group::Grype Dependency Scan"
+          grype dir:. \
+            --output sarif \
+            --file results/grype-sca.sarif
           echo "::endgroup::"
 
       # ─────────────────────────────────────────────
