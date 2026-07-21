@@ -32,11 +32,9 @@ jobs:
       - name: Install security tools
         run: |
           pip install checkov semgrep
-          # Trivy installation
-          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update && sudo apt-get install -y trivy
+          # Trivy — install via official script
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+          trivy --version
 
       # ─────────────────────────────────────────────
       # 1. Secrets Detection (Checkov)
@@ -55,6 +53,24 @@ jobs:
 
           # Rename output for clarity
           mv results/results_sarif.sarif results/checkov-secrets.sarif 2>/dev/null || true
+
+      # ─────────────────────────────────────────────
+      # 2. IaC Scanning (Checkov)
+      # ─────────────────────────────────────────────
+      - name: "Checkov: IaC Scan"
+        id: checkov_iac
+        continue-on-error: true
+        run: |
+          echo "::group::Checkov IaC Scan"
+          checkov --directory . \
+            --framework terraform,cloudformation,kubernetes,dockerfile,github_actions \
+            --output sarif \
+            --output-file-path results/ \
+            --soft-fail
+          echo "::endgroup::"
+
+          # Rename output for clarity
+          mv results/results_sarif.sarif results/checkov-iac.sarif 2>/dev/null || true
 
       # ─────────────────────────────────────────────
       # 2. Dependency/SCA Scanning (Trivy)
