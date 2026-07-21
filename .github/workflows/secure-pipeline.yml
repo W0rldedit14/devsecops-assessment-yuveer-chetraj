@@ -2,9 +2,9 @@ name: Secure CI/CD Pipeline
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, candidate-assessment]
   pull_request:
-    branches: [main]
+    branches: [main, candidate-assessment]
   workflow_dispatch:
 
 env:
