@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 Multi-Scanner Orchestrator
-Runs multiple security tools (Checkov, Semgrep) and aggregates SARIF results
+Runs multiple security tools (Checkov, Trivy, Semgrep) and aggregates SARIF results
 into a unified JSON output with pass/fail decision.
 
 Tools used:
-- Checkov: Secrets detection and dependency scanning
+- Checkov: Secrets detection
+- Trivy: Dependency/vulnerability scanning (SCA)
 - Semgrep: SAST (Static Application Security Testing)
 """
 
@@ -19,22 +20,55 @@ from datetime import datetime
 from pathlib import Path
 
 
+def find_tool(tool_name):
+    """Find the full path to a tool, checking common install locations on Windows."""
+    import shutil
+    # Check if it's already on PATH
+    found = shutil.which(tool_name)
+    if found:
+        return found
+    # Check common Windows install locations
+    if sys.platform == "win32":
+        home = os.path.expanduser("~")
+        candidates = [
+            os.path.join(home, tool_name, f"{tool_name}.exe"),
+            os.path.join(home, f"{tool_name}.exe"),
+            os.path.join("C:\\ProgramData\\chocolatey\\bin", f"{tool_name}.exe"),
+            os.path.join("C:\\ProgramData\\chocolatey\\lib", tool_name, "tools", f"{tool_name}.exe"),
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+    return tool_name  # Fall back to just the name
+
+
 def run_command(cmd, description):
     """Run a shell command and return success status and output."""
+    # Join into a single string for shell=True (required on Windows for .cmd wrappers)
+    cmd_str = " ".join(cmd)
     print(f"[*] Running: {description}")
-    print(f"    Command: {' '.join(cmd)}")
+    print(f"    Command: {cmd_str}")
+
+    # Force UTF-8 for tools that emit emoji/unicode (e.g. semgrep)
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+
     try:
         result = subprocess.run(
-            cmd,
+            cmd_str,
             capture_output=True,
-            text=True,
-            timeout=300
+            timeout=300,
+            shell=True,
+            env=env
         )
+        # Decode with utf-8, replacing any bytes that can't be decoded
+        stdout = result.stdout.decode("utf-8", errors="replace")
+        stderr = result.stderr.decode("utf-8", errors="replace")
         return {
             "success": result.returncode == 0,
             "returncode": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr
+            "stdout": stdout,
+            "stderr": stderr
         }
     except subprocess.TimeoutExpired:
         return {"success": False, "returncode": -1, "stdout": "", "stderr": "Command timed out"}
@@ -49,9 +83,9 @@ def parse_sarif(sarif_path):
         return findings
 
     try:
-        with open(sarif_path, "r") as f:
+        with open(sarif_path, "r", encoding="utf-8") as f:
             sarif_data = json.load(f)
-    except (json.JSONDecodeError, IOError) as e:
+    except (json.JSONDecodeError, IOError, UnicodeDecodeError) as e:
         print(f"    [!] Error parsing SARIF file {sarif_path}: {e}")
         return findings
 
@@ -103,15 +137,25 @@ def map_level_to_severity(level):
     return mapping.get(level, "medium")
 
 
+def find_sarif_file(output_dir):
+    """Find the SARIF file produced by Checkov in the output directory."""
+    # Checkov may output as results_sarif.sarif or in a subdirectory
+    for root, dirs, files in os.walk(output_dir):
+        for f in files:
+            if f.endswith(".sarif"):
+                return os.path.join(root, f)
+    return None
+
+
 def run_checkov_secrets(target_path, output_dir):
     """Run Checkov for secrets scanning."""
     sarif_path = os.path.join(output_dir, "checkov_secrets.sarif")
     cmd = [
         "checkov",
-        "--directory", str(target_path),
+        "--directory", f'"{str(target_path)}"',
         "--framework", "secrets",
         "--output", "sarif",
-        "--output-file-path", output_dir,
+        "--output-file-path", f'"{output_dir}"',
         "--soft-fail"
     ]
     result = run_command(cmd, "Checkov Secrets Scan")
@@ -120,41 +164,73 @@ def run_checkov_secrets(target_path, output_dir):
     checkov_sarif = os.path.join(output_dir, "results_sarif.sarif")
     if os.path.exists(checkov_sarif):
         os.rename(checkov_sarif, sarif_path)
+    else:
+        # Search for any sarif file produced
+        found = find_sarif_file(output_dir)
+        if found and found != sarif_path:
+            os.rename(found, sarif_path)
 
     return sarif_path, result
 
 
-def run_checkov_sca(target_path, output_dir):
-    """Run Checkov for dependency/SCA scanning."""
-    sarif_path = os.path.join(output_dir, "checkov_sca.sarif")
+def run_trivy_sca(target_path, output_dir):
+    """Run Trivy for dependency/vulnerability scanning (SCA)."""
+    sarif_path = os.path.join(output_dir, "trivy_sca.sarif")
+    trivy_bin = find_tool("trivy")
     cmd = [
-        "checkov",
-        "--directory", str(target_path),
-        "--framework", "sca_package",
-        "--output", "sarif",
-        "--output-file-path", output_dir,
-        "--soft-fail"
+        f'"{trivy_bin}"', "fs",
+        "--scanners", "vuln",
+        "--format", "sarif",
+        "--output", f'"{sarif_path}"',
+        f'"{str(target_path)}"'
     ]
-    result = run_command(cmd, "Checkov Dependency (SCA) Scan")
-
-    checkov_sarif = os.path.join(output_dir, "results_sarif.sarif")
-    if os.path.exists(checkov_sarif):
-        os.rename(checkov_sarif, sarif_path)
-
+    result = run_command(cmd, "Trivy Dependency (SCA) Scan")
     return sarif_path, result
 
 
 def run_semgrep_sast(target_path, output_dir):
     """Run Semgrep for SAST scanning."""
     sarif_path = os.path.join(output_dir, "semgrep_sast.sarif")
-    cmd = [
-        "semgrep", "scan",
-        "--config", "auto",
-        "--sarif",
-        "--output", sarif_path,
-        str(target_path)
-    ]
-    result = run_command(cmd, "Semgrep SAST Scan")
+
+    # use chcp 65001 to switch cmd.exe
+    # to UTF-8 code page so semgrep can write emoji without crashing.
+    # Then redirect SARIF stdout to file directly in the shell.
+    cmd_str = (
+        f'chcp 65001 >NUL & '
+        f'semgrep scan --config auto --sarif '
+        f'"{str(target_path)}" '
+        f'> "{sarif_path}" '
+        f'2>NUL'
+    )
+    print(f"[*] Running: Semgrep SAST Scan")
+    print(f"    Command: semgrep scan --config auto --sarif \"{target_path}\"")
+
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["NO_COLOR"] = "1"
+    # Override any system-level SEMGREP_SEND_METRICS=off (blocks --config auto)
+    env["SEMGREP_SEND_METRICS"] = "auto"
+
+    try:
+        proc = subprocess.run(
+            cmd_str,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=300,
+            shell=True,
+            env=env
+        )
+        result = {
+            "success": proc.returncode == 0,
+            "returncode": proc.returncode,
+            "stdout": "",
+            "stderr": ""
+        }
+    except subprocess.TimeoutExpired:
+        result = {"success": False, "returncode": -1, "stdout": "", "stderr": "Command timed out"}
+    except Exception as e:
+        result = {"success": False, "returncode": -1, "stdout": "", "stderr": str(e)}
+
     return sarif_path, result
 
 
@@ -170,12 +246,10 @@ def aggregate_results(all_findings):
         tool = finding["tool"].lower()
         if "secret" in tool or "secret" in finding.get("rule_id", "").lower():
             categories["secrets"].append(finding)
-        elif "sca" in tool or "checkov" in tool:
-            # Checkov SCA findings go to dependencies
-            if "sca" in finding.get("rule_id", "").lower() or finding.get("_category") == "dependencies":
-                categories["dependencies"].append(finding)
-            else:
-                categories["secrets"].append(finding)
+        elif "trivy" in tool:
+            categories["dependencies"].append(finding)
+        elif "checkov" in tool:
+            categories["secrets"].append(finding)
         elif "semgrep" in tool:
             categories["sast"].append(finding)
         else:
@@ -249,10 +323,10 @@ def main():
         all_findings.extend(secrets_findings)
         print(f"    Found {len(secrets_findings)} finding(s)\n")
 
-        # 2. Run Checkov SCA/Dependency Scan
-        sarif_path, result = run_checkov_sca(target_path, output_dir)
-        scan_results["checkov_sca"] = {
-            "tool": "checkov",
+        # 2. Run Trivy Dependency/SCA Scan
+        sarif_path, result = run_trivy_sca(target_path, output_dir)
+        scan_results["trivy_sca"] = {
+            "tool": "trivy",
             "category": "dependencies",
             "success": result["success"],
             "returncode": result["returncode"]
@@ -292,7 +366,7 @@ def main():
         "scan_metadata": {
             "target": str(target_path),
             "timestamp": datetime.now().isoformat(),
-            "tools": ["checkov", "semgrep"]
+            "tools": ["checkov", "trivy", "semgrep"]
         },
         "summary": {
             "overall_result": "PASS" if overall_pass else "FAIL",
