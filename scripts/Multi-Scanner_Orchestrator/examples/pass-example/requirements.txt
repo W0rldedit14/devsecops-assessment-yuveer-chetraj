@@ -1,0 +1,4 @@
+# Clean dependencies - no known vulnerabilities
+flask==3.1.0
+requests==2.32.3
+pyyaml==6.0.2

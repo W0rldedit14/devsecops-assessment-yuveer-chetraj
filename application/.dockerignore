@@ -1,0 +1,35 @@
+# Dependencies (rebuilt in container)
+node_modules/
+.mvn/repository/
+
+# Build outputs
+build/
+dist/
+target/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Environment files (secrets should never be in images)
+.env
+.env.*
+*.env
+
+# Test/coverage
+coverage/
+*.test.js
+__tests__/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile*
+docker-compose*

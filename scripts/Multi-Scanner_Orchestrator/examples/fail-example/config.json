@@ -1,0 +1,8 @@
+{
+  "app_name": "vulnerable-example",
+  "version": "1.0.0",
+  "database_url": "postgresql://admin:SuperSecret123!@prod-db.example.com:5432/myapp",
+  "api_key": "sk-proj-abc123def456ghi789jkl012mno345pqr678stu901vwx234",
+  "aws_secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+  "aws_access_key_id": "AKIAIOSFODNN7EXAMPLE"
+}

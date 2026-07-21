@@ -1,0 +1,201 @@
+name: Secure CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, candidate-assessment]
+  pull_request:
+    branches: [main, candidate-assessment]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ─────────────────────────────────────────────
+      # Tool Installation
+      # ─────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install security tools
+        run: |
+          pip install checkov semgrep
+          # Grype — install via official script
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+          grype version
+
+      # ─────────────────────────────────────────────
+      # 1. Secrets Detection (Checkov)
+      # ─────────────────────────────────────────────
+      - name: "Checkov: Secrets Scan"
+        id: checkov_secrets
+        continue-on-error: true
+        run: |
+          echo "::group::Checkov Secrets Scan"
+          checkov --directory . \
+            --framework secrets \
+            --output sarif \
+            --output-file-path results/ \
+            --soft-fail
+          echo "::endgroup::"
+
+          # Rename output for clarity
+          mv results/results_sarif.sarif results/checkov-secrets.sarif 2>/dev/null || true
+
+      # ─────────────────────────────────────────────
+      # 2. IaC Scanning (Checkov)
+      # ─────────────────────────────────────────────
+      - name: "Checkov: IaC Scan"
+        id: checkov_iac
+        continue-on-error: true
+        run: |
+          echo "::group::Checkov IaC Scan"
+          checkov --directory . \
+            --framework terraform,cloudformation,kubernetes,dockerfile,github_actions \
+            --output sarif \
+            --output-file-path results/ \
+            --soft-fail
+          echo "::endgroup::"
+
+          # Rename output for clarity
+          mv results/results_sarif.sarif results/checkov-iac.sarif 2>/dev/null || true
+
+      # ─────────────────────────────────────────────
+      # 3. Dependency/SCA Scanning (Grype)
+      # ─────────────────────────────────────────────
+      - name: "Grype: Dependency Scan"
+        id: grype_sca
+        continue-on-error: true
+        run: |
+          echo "::group::Grype Dependency Scan"
+          grype dir:. \
+            --output sarif \
+            --file results/grype-sca.sarif
+          echo "::endgroup::"
+
+      # ─────────────────────────────────────────────
+      # 3. SAST Scanning (Semgrep)
+      # ─────────────────────────────────────────────
+      - name: "Semgrep: SAST Scan"
+        id: semgrep_sast
+        continue-on-error: true
+        run: |
+          echo "::group::Semgrep SAST Scan"
+          semgrep scan \
+            --config auto \
+            --sarif \
+            --output results/semgrep-sast.sarif \
+            .
+          echo "::endgroup::"
+
+      # ─────────────────────────────────────────────
+      # Quality Gate — Evaluate SARIF results
+      # ─────────────────────────────────────────────
+      - name: "Quality Gate: Evaluate Findings"
+        id: quality_gate
+        run: |
+          echo "::group::Quality Gate Evaluation"
+          python3 << 'EOF'
+          import json
+          import glob
+          import sys
+          import os
+
+          sarif_files = glob.glob("results/*.sarif")
+          print(f"Found {len(sarif_files)} SARIF file(s)")
+
+          total_critical = 0
+          total_high = 0
+          total_medium = 0
+          total_low = 0
+          findings_detail = []
+
+          for sarif_file in sarif_files:
+              try:
+                  with open(sarif_file, "r") as f:
+                      data = json.load(f)
+              except (json.JSONDecodeError, FileNotFoundError) as e:
+                  print(f"  [!] Could not parse {sarif_file}: {e}")
+                  continue
+
+              tool_name = "unknown"
+              for run in data.get("runs", []):
+                  tool_name = run.get("tool", {}).get("driver", {}).get("name", "unknown")
+                  for result in run.get("results", []):
+                      level = result.get("level", "warning")
+                      rule_id = result.get("ruleId", "unknown")
+                      message = result.get("message", {}).get("text", "")[:100]
+
+                      if level == "error":
+                          total_critical += 1
+                          findings_detail.append(f"  🔴 CRITICAL [{tool_name}] {rule_id}: {message}")
+                      elif level == "warning":
+                          total_high += 1
+                          findings_detail.append(f"  🟠 HIGH [{tool_name}] {rule_id}: {message}")
+                      elif level == "note":
+                          total_medium += 1
+                      else:
+                          total_low += 1
+
+              print(f"  Parsed: {sarif_file} (tool: {tool_name})")
+
+          # Summary
+          print("\n" + "=" * 60)
+          print("  SECURITY QUALITY GATE RESULTS")
+          print("=" * 60)
+          print(f"  Critical: {total_critical}")
+          print(f"  High:     {total_high}")
+          print(f"  Medium:   {total_medium}")
+          print(f"  Low:      {total_low}")
+          print("=" * 60)
+
+          # Show critical/high details
+          if findings_detail:
+              print("\n  Findings detail:")
+              for f in findings_detail:
+                  print(f)
+
+          # Write GitHub Actions output
+          with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
+              gh.write(f"critical={total_critical}\n")
+              gh.write(f"high={total_high}\n")
+              gh.write(f"medium={total_medium}\n")
+              gh.write(f"total={total_critical + total_high + total_medium + total_low}\n")
+
+          # Quality gate decision
+          if total_critical > 0:
+              print(f"\n  ❌ FAIL: {total_critical} critical finding(s) detected!")
+              print("  Pipeline will be failed.")
+              sys.exit(1)
+          elif total_high > 0:
+              print(f"\n  ⚠️  WARN: {total_high} high finding(s) detected.")
+              print("  Pipeline passes but findings should be reviewed.")
+              sys.exit(0)
+          else:
+              print(f"\n  ✅ PASS: No critical or high findings.")
+              sys.exit(0)
+          EOF
+          echo "::endgroup::"
+
+      # ─────────────────────────────────────────────
+      # Upload artifacts for audit
+      # ─────────────────────────────────────────────
+      - name: Upload scan results as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-scan-results
+          path: results/
+          retention-days: 30

@@ -1,0 +1,78 @@
+version: "3.8"
+
+services:
+  # ─────────────────────────────────────────────
+  # Frontend — React App served via serve
+  # ─────────────────────────────────────────────
+  frontend:
+    build:
+      context: ..
+      dockerfile: application/Dockerfile
+      target: frontend
+    container_name: country-flags-frontend
+    ports:
+      - "8080:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - app-network
+    # Security: Drop all capabilities
+    cap_drop:
+      - ALL
+    # Security: Prevent privilege escalation
+    security_opt:
+      - no-new-privileges:true
+    # Security: Resource limits to prevent DoS
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+        reservations:
+          cpus: "0.1"
+          memory: 32M
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # Backend — Spring Boot API
+  # ─────────────────────────────────────────────
+  backend:
+    build:
+      context: ..
+      dockerfile: application/Dockerfile
+      target: backend
+    container_name: country-flags-backend
+    ports:
+      - "8081:8081"
+    networks:
+      - app-network
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+      - JAVA_OPTS=-Xmx256m -Xms128m
+    # Security: Drop all capabilities
+    cap_drop:
+      - ALL
+    # Security: Prevent privilege escalation
+    security_opt:
+      - no-new-privileges:true
+    # Security: Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    healthcheck:
+      test: ["CMD-SHELL", "wget --server-response --spider http://localhost:8081/ 2>&1 | grep -q 'HTTP' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge
