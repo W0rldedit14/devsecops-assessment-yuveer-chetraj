@@ -164,10 +164,8 @@ jobs:
           # Show critical/high details
           if findings_detail:
               print("\n  Findings detail:")
-              for f in findings_detail[:30]:  # Limit output
+              for f in findings_detail:
                   print(f)
-              if len(findings_detail) > 30:
-                  print(f"  ... and {len(findings_detail) - 30} more")
 
           # Write GitHub Actions output
           with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
