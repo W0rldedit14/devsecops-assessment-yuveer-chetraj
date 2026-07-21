@@ -1,0 +1,7 @@
+{
+  "app_name": "clean-example",
+  "version": "1.0.0",
+  "log_level": "INFO",
+  "host": "0.0.0.0",
+  "port": 8080
+}
