@@ -1,160 +1,241 @@
-# Container Security
+# Container Security Documentation
 
 ## Overview
 
-Secure containerization of the Country Flags application (React frontend + Spring Boot backend) using multi-stage Docker builds, Alpine base images, non-root users, and runtime security constraints via Docker Compose.
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────┐
-│              Docker Compose Network              │
-│                                                 │
-│  ┌──────────────┐       ┌──────────────────┐   │
-│  │   Frontend   │       │     Backend      │   │
-│  │  node:alpine │──────▶│  temurin:11-jre  │   │
-│  │  serve :8080 │ /api/ │  :8081           │   │
-│  │  non-root    │       │  non-root        │   │
-│  │  read-only   │       │  read-only       │   │
-│  └──────────────┘       └──────────────────┘   │
-│         ▲                                       │
-└─────────┼───────────────────────────────────────┘
-          │
-    Host :8080
-```
-
-## Security Measures Implemented
-
-### 1. Base Image Selection & Hardening
-
-| Decision | Rationale |
-|----------|-----------|
-| `node:20-alpine` (build) | Minimal build image, no unnecessary OS packages |
-| `node:20-alpine` + `serve` (frontend prod) | Same small Alpine base, `serve` is a zero-config static file server (~5MB overhead) |
-| `eclipse-temurin:11-jre-alpine` (backend prod) | JRE-only (no JDK/compiler), Alpine base |
-
-### 2. Multi-Stage Builds
-
-Both Dockerfiles use multi-stage builds:
-
-```
-Stage 1 (Build)          Stage 2 (Production)
-┌──────────────┐         ┌───────────────────┐
-│ node_modules │         │ Static HTML/JS/CSS │  ← Only built assets
-│ source code  │   ──▶   │ serve (static svr) │
-│ npm/maven    │         │ ~50MB total        │
-│ ~800MB+      │         └───────────────────┘
-└──────────────┘
-```
-
-**Security benefit:** Build tools, source code, dev dependencies, and package managers are NOT present in the production image. This eliminates entire classes of supply chain attacks.
-
-### 3. Non-Root Execution
-
-```dockerfile
-# Both containers run as UID 1001, not root
-RUN addgroup -g 1001 -S appgroup && \
-    adduser -u 1001 -S appuser -G appgroup
-USER appuser
-```
-
-**Why this matters:** If an attacker achieves code execution inside the container, they cannot:
-- Install packages
-- Modify system files
-- Access `/etc/shadow`
-- Bind to privileged ports (<1024)
-- Escape to the host via root-level exploits
-
-### 4. Dependency Management
-
-| Measure | Implementation |
-|---------|---------------|
-| Lock files | `package-lock.json` and Maven dependency resolution ensure reproducible builds |
-| `npm ci --ignore-scripts` | Installs exact versions from lockfile, skips post-install scripts (prevents supply chain attacks) |
-| `mvnw dependency:go-offline` | Pre-downloads all deps in a separate layer for caching and auditability |
-| `.dockerignore` | Prevents `node_modules/`, `.env`, `.git/` from entering the build context |
-
-### 5. Runtime Security (Docker Compose)
-
-| Control | Setting | Purpose |
-|---------|---------|---------|
-| **Drop capabilities** | `cap_drop: [ALL]` | Removes all Linux capabilities (no raw sockets, no network admin, no mount) |
-| **No privilege escalation** | `no-new-privileges:true` | Prevents `setuid`/`setgid` binaries from gaining root |
-| **Read-only filesystem** | `read_only: true` | Container filesystem is immutable; writes only to tmpfs mounts |
-| **tmpfs for writes** | `/tmp`, `/var/cache/nginx`, `/var/run` | Volatile storage for required writable paths only |
-| **Resource limits** | CPU + memory caps | Prevents resource exhaustion / DoS attacks |
-| **Health checks** | HTTP endpoint checks | Enables automatic restart of failed containers |
-| **Restart policy** | `unless-stopped` | Auto-recovery without requiring manual intervention |
-
-### 6. Network Security
-
-- Containers communicate over an isolated Docker bridge network
-- Only required ports are published to the host (8080, 8081)
-- Frontend proxies `/api/` to backend — backend doesn't need direct external access
-
-### 7. Scanning Commands
-
-```bash
-# Scan built images for vulnerabilities (Trivy)
-docker build -t country-flags-frontend -f application/Dockerfile .
-trivy image country-flags-frontend
-
-# Scan Dockerfiles for misconfigurations (Checkov)
-checkov --file application/Dockerfile --framework dockerfile
-checkov --file application/Dockerfile.backend --framework dockerfile
-
-# Scan Docker Compose for insecure settings (Checkov)
-checkov --file infrastructure/docker-compose.yml
-```
-
-## Scanning Integration
-
-### Container Image Scanning (Trivy)
-
-```bash
-# Scan the built frontend image
-docker build -t country-flags-frontend -f application/Dockerfile .
-trivy image country-flags-frontend --format sarif --output trivy-frontend.sarif
-
-# Scan the built backend image
-docker build -t country-flags-backend -f application/Dockerfile.backend .
-trivy image country-flags-backend --format sarif --output trivy-backend.sarif
-```
-
-### Dockerfile Linting (Checkov)
-
-```bash
-# Scan Dockerfiles for misconfigurations
-checkov --file application/Dockerfile --framework dockerfile
-checkov --file application/Dockerfile.backend --framework dockerfile
-```
-
-### Docker Compose Security Check (Checkov)
-
-```bash
-# Scan compose file for insecure configurations
-checkov --file infrastructure/docker-compose.yml
-```
-
-```bash
-# From the repository root
-cd infrastructure
-docker compose up --build
-
-# Access:
-# Frontend: http://localhost:8080
-# Backend:  http://localhost:8081
-```
+Secure containerization of the Country Flags application (React frontend + Spring Boot backend) using a single multi-stage Dockerfile with build targets, Alpine base images, and runtime security constraints via Docker Compose.
 
 ## File Structure
 
 ```
 application/
-├── Dockerfile              # Frontend (React → Node Alpine + serve)
-├── Dockerfile.backend      # Backend (Spring Boot → JRE Alpine)
-├── .dockerignore           # Prevents secrets/source from leaking into images
-└── README.md               # This documentation
+├── Dockerfile          # Multi-stage: targets "frontend" and "backend"
+├── .dockerignore       # Prevents secrets/source from leaking into images
+└── README.md           # This documentation
 
 infrastructure/
-└── docker-compose.yml      # Secure deployment with runtime constraints
+└── docker-compose.yml  # Secure deployment with runtime constraints
+```
+
+---
+
+## 1. Base Image Selection & Hardening
+
+### Decisions
+
+| Image | Used For | Why |
+|-------|----------|-----|
+| `node:20-alpine` | Frontend build + runtime | Alpine is ~5MB vs ~900MB for full Debian. Minimal OS = fewer CVEs to patch. |
+| `maven:3.9-eclipse-temurin-17-alpine` | Backend build only | Full JDK + Maven needed for compilation, but never ships to production. |
+| `eclipse-temurin:17-jre-alpine` | Backend runtime | JRE-only (no compiler/debugger), Alpine base. Removes entire JDK attack surface. |
+
+### Hardening Measures
+
+| Measure | Implementation | Security Benefit |
+|---------|---------------|------------------|
+| **Pinned image digests** | `FROM node:20-alpine@sha256:fb4cd12c...` | Prevents supply chain attacks — even if the tag is overwritten on Docker Hub, we pull the exact verified image |
+| **Multi-stage builds** | Build tools in stage 1, only artifacts in stage 2 | Production image has no source code, no package managers, no compilers |
+| **Alpine base** | All production images use Alpine Linux | ~5MB base with musl libc. Fewer packages = fewer vulnerabilities |
+| **npm cache clean** | `npm cache clean --force` | Removes cached packages that could contain pre/post-install exploits |
+
+### What's NOT in the production image
+
+| Removed via multi-stage | Risk it eliminates |
+|------------------------|-------------------|
+| `node_modules/` (1000+ packages) | Supply chain vulnerabilities in dev dependencies |
+| Maven, JDK, compiler tools | Compiler-based attacks, tool exploitation |
+| Source code (`*.java`, `*.jsx`) | Source code disclosure |
+| `.git/` directory | Credential/history leakage |
+| `.env` files | Secret exposure |
+
+---
+
+## 2. Dependency Management
+
+| Measure | Implementation | Security Benefit |
+|---------|---------------|------------------|
+| **Lock files** | `package-lock.json` for npm, `pom.xml` with fixed versions | Reproducible builds — same deps every time |
+| **`npm ci --ignore-scripts`** | Dockerfile frontend build stage | Installs exact versions from lockfile. `--ignore-scripts` prevents `postinstall` scripts from executing (blocks supply chain attacks like event-stream) |
+| **`mvnw dependency:go-offline`** | Dockerfile backend build stage | Pre-downloads all Maven deps in a cached layer. Deps are resolved once and frozen. |
+| **`.dockerignore`** | Excludes `node_modules/`, `.env`, `.git/`, `target/` | Prevents local dev dependencies or secrets from accidentally entering the build context |
+| **No `apt-get`/`apk add` in production** | Only `dumb-init` added to backend | Minimises additional packages. No package manager left in production image. |
+
+---
+
+## 3. Runtime Security (User, Permissions, Capabilities)
+
+### Non-Root Execution
+
+```dockerfile
+RUN addgroup -g 1001 -S appgroup && \
+    adduser -u 1001 -S appuser -G appgroup
+USER appuser
+```
+
+Both containers run as **UID 1001** (not root). If an attacker gains code execution, they cannot:
+- Install packages or modify system files
+- Read `/etc/shadow` or other sensitive system files
+- Bind to privileged ports (< 1024)
+- Exploit kernel vulnerabilities that require root
+
+### File Permissions
+
+```dockerfile
+RUN chown appuser:appgroup app.jar && \
+    chmod 400 app.jar
+```
+
+The backend JAR is **read-only by owner only** (400). Even if another process runs in the container, it cannot modify or replace the application binary.
+
+### Capabilities (Docker Compose)
+
+```yaml
+cap_drop:
+  - ALL
+security_opt:
+  - no-new-privileges:true
+```
+
+| Control | What it does |
+|---------|-------------|
+| `cap_drop: ALL` | Removes ALL Linux capabilities. No raw sockets, no network admin, no mount, no chown, no kill signals to other processes. |
+| `no-new-privileges` | Prevents any process from gaining more privileges than its parent (blocks setuid/setgid exploitation). |
+
+### Read-Only Filesystem
+
+```yaml
+read_only: true
+tmpfs:
+  - /tmp:noexec,nosuid,size=100M
+```
+
+| Control | What it does |
+|---------|-------------|
+| `read_only: true` | Entire container filesystem is immutable. Attackers cannot write backdoors, cron jobs, or scripts. |
+| `tmpfs` with `noexec` | Only `/tmp` is writable (needed by JVM/Node). But nothing written there can be executed. |
+| `nosuid` | No setuid binaries can be placed in writable areas. |
+| `size=` limits | Caps tmpfs size to prevent disk-filling DoS. |
+
+### Resource Limits
+
+```yaml
+deploy:
+  resources:
+    limits:
+      cpus: "1.0"
+      memory: 512M
+```
+
+Prevents a compromised container from consuming all host resources (CPU/memory DoS).
+
+### Health Checks
+
+```yaml
+healthcheck:
+  test: ["CMD-SHELL", "wget --server-response --spider http://localhost:8081/ 2>&1 | grep -q 'HTTP' || exit 1"]
+  interval: 10s
+  start_period: 60s
+```
+
+Containers are automatically restarted if they become unhealthy. Combined with `restart: unless-stopped`, this provides self-healing without manual intervention.
+
+---
+
+## 4. Scanning Integration
+
+### Container Image Scanning (Trivy)
+
+Scan built images for OS and library vulnerabilities:
+
+```bash
+# Build images
+docker compose build
+
+# Scan frontend image
+trivy image infrastructure-frontend --severity HIGH,CRITICAL
+
+# Scan backend image
+trivy image infrastructure-backend --severity HIGH,CRITICAL
+
+# Output as SARIF for CI integration
+trivy image infrastructure-backend --format sarif --output trivy-backend.sarif
+```
+
+### Dockerfile Best Practice Scanning (Checkov)
+
+Scan Dockerfiles for misconfigurations:
+
+```bash
+checkov --file application/Dockerfile --framework dockerfile
+```
+
+Example findings Checkov catches:
+- Missing `HEALTHCHECK` instruction
+- Running as root (no `USER` directive)
+- Using `latest` tag instead of pinned versions
+- Missing `--no-cache` on `apk add`
+
+### Docker Compose Scanning (Checkov)
+
+```bash
+checkov --file infrastructure/docker-compose.yml
+```
+
+Example findings:
+- Missing `cap_drop`
+- No resource limits defined
+- `privileged: true` usage
+- Missing `read_only` filesystem
+
+---
+
+## 5. Security Decisions Summary
+
+| Decision | Alternative Considered | Why This Choice |
+|----------|----------------------|-----------------|
+| Alpine over Debian/Ubuntu | Debian slim | Alpine has ~5MB base with far fewer CVEs. Tradeoff: musl libc can cause compatibility issues, but not for our use case. |
+| `serve` over Nginx | Nginx Alpine | Simpler setup, fewer moving parts. For a production system, Nginx would provide security headers and better performance. |
+| Pinned digests over tags | Just `:20-alpine` tag | Tags are mutable — a compromised Docker Hub account could push a malicious image to the same tag. Digests are immutable. |
+| `cap_drop: ALL` over selective | Only drop dangerous ones | Principle of least privilege. Start with nothing, add back only if needed. Neither app needs any Linux capabilities. |
+| Read-only + tmpfs over writable | Default writable filesystem | Prevents persistence. Even if attacker gets shell, they can't write malware. tmpfs with noexec means they can't execute anything either. |
+| Non-root (UID 1001) over root | Run as root (default) | Container breakout exploits almost always require root. Non-root limits blast radius significantly. |
+| `--ignore-scripts` on npm | Default npm install | Blocks supply chain attacks via postinstall scripts (like the event-stream incident). Build still works because our deps don't need lifecycle scripts. |
+| `dumb-init` for backend | Direct `java -jar` | Proper signal handling (SIGTERM forwarded to JVM). Prevents zombie processes. Enables graceful shutdown. |
+| Separate build targets in one Dockerfile | Two Dockerfiles | Single source of truth, easier to maintain, shared patterns visible. Docker Compose `target:` selects which to build. |
+
+---
+
+## Running the Application
+
+```bash
+cd infrastructure
+docker compose up --build
+
+# Frontend: http://localhost:8080
+# Backend:  http://localhost:8081
+
+# Stop
+docker compose down
+```
+
+## Verifying Security Controls
+
+```bash
+# Confirm non-root
+docker exec country-flags-frontend whoami
+# → appuser
+
+# Confirm read-only filesystem
+docker exec country-flags-frontend sh -c "touch /pwned"
+# → Read-only file system
+
+# Confirm noexec tmpfs
+docker exec country-flags-backend sh -c "echo '#!/bin/sh' > /tmp/test.sh && chmod +x /tmp/test.sh && /tmp/test.sh"
+# → Permission denied
+
+# Confirm no capabilities
+docker exec country-flags-frontend sh -c "cat /proc/1/status | grep CapEff"
+# → 0000000000000000 (no capabilities)
+
+# Check resource usage
+docker stats --no-stream
 ```
