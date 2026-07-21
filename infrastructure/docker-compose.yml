@@ -2,12 +2,13 @@ version: "3.8"
 
 services:
   # ─────────────────────────────────────────────
-  # Frontend — React App served via Nginx
+  # Frontend — React App served via serve
   # ─────────────────────────────────────────────
   frontend:
     build:
       context: ..
       dockerfile: application/Dockerfile
+      target: frontend
     container_name: country-flags-frontend
     ports:
       - "8080:8080"
@@ -16,7 +17,7 @@ services:
         condition: service_healthy
     networks:
       - app-network
-    # Security: Drop all capabilities, add only what's needed
+    # Security: Drop all capabilities
     cap_drop:
       - ALL
     # Security: Prevent privilege escalation
@@ -39,7 +40,8 @@ services:
   backend:
     build:
       context: ..
-      dockerfile: application/Dockerfile.backend
+      dockerfile: application/Dockerfile
+      target: backend
     container_name: country-flags-backend
     ports:
       - "8081:8081"
@@ -74,5 +76,3 @@ services:
 networks:
   app-network:
     driver: bridge
-    # Security: Internal network, no external access between containers and host
-    internal: false
